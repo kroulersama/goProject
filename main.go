@@ -1,22 +1,24 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
-	"github.com/gofiber/fiber/v3"
 	"github.com/kroulersama/goProject/models"
 	"github.com/kroulersama/goProject/storage"
+	_ "github.com/lib/pq"
+	"github.com/pressly/goose/v3"
 	"gorm.io/gorm"
 )
 
 func main() {
+	//Инициализация базы с goose миграциями
 	config := &storage.Config{
 		Host:     os.Getenv("DB_HOST"),
 		Port:     os.Getenv("DB_PORT"),
@@ -26,22 +28,25 @@ func main() {
 		DBName:   os.Getenv("DB_NAME"),
 	}
 
+	dsn := config.GetDSN()
+
+	waitForDB(dsn)
+
+	if err := runMigrations(dsn); err != nil {
+		log.Fatalf("Failed to run migrations: %v", err)
+	}
+	//Инициализация GORM
 	db, err := storage.NewConnection(config)
 	if err != nil {
 		log.Fatal("could not load the database")
 	}
 
-	err = models.MigrateDepartment(db)
-	if err != nil {
-		log.Fatal("could not migrate db")
-	}
-
-	r := Reposytory{
+	r := Repository{
 		DB: db,
 	}
 
+	//Инициализация Путей
 	mux := http.NewServeMux()
-
 	mux.HandleFunc("POST /departments", r.CreateDepartment)
 	mux.HandleFunc("POST /departments/{id}/employee", r.CreateEmployeeInDepartment)
 	mux.HandleFunc("GET /departments/{id}", r.GetDepartment)
@@ -54,7 +59,48 @@ func main() {
 	}
 }
 
-type Reposytory struct {
+// Применяем миграции
+func runMigrations(dsn string) error {
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	if err := goose.SetDialect("postgres"); err != nil {
+		return err
+	}
+
+	if err := goose.Up(db, "migrations"); err != nil {
+		return err
+	}
+
+	log.Println("Migrations applied successfully")
+	return nil
+}
+
+// Ожидание готовности базы
+func waitForDB(dsn string) {
+	log.Println("Waiting for database...")
+
+	for i := 0; i < 30; i++ {
+		db, err := sql.Open("postgres", dsn)
+		if err == nil {
+			if err = db.Ping(); err == nil {
+				db.Close()
+				log.Println("Database is ready!")
+				return
+			}
+			db.Close()
+		}
+		time.Sleep(2 * time.Second)
+		log.Printf("Retrying... (%d/30)", i+1)
+	}
+
+	log.Fatal("Database not ready after 30 attempts")
+}
+
+type Repository struct {
 	DB *gorm.DB
 }
 
@@ -64,75 +110,70 @@ type CreateDepartmentRequest struct {
 	ParentID *uint  `json:"parent_id"`
 }
 
-func (r *Reposytory) CreateDepartment(w http.ResponseWriter, req *http.Request) {
-
-	//Обработка заявки
+func (r *Repository) CreateDepartment(w http.ResponseWriter, req *http.Request) {
+	// 1. Проверка метода
 	if req.Method != http.MethodPost {
-		http.Error(w, "Mettod not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	var deptReq CreateDepartmentRequest
-
+	// 2. Декодирование JSON
+	var deptReq models.DepartmentRequest
 	if err := json.NewDecoder(req.Body).Decode(&deptReq); err != nil {
 		w.WriteHeader(http.StatusUnprocessableEntity)
 		json.NewEncoder(w).Encode(map[string]string{
 			"message": "request failed",
 			"error":   err.Error(),
 		})
-	}
-
-	//Валидация
-	if deptReq.Name == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{
-			"message": "department name cannot be empty",
-		})
 		return
 	}
 
-	if len(deptReq.Name) > 200 {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{
-			"message": "department name too long (max 200)",
-		})
+	// 3. ВСЯ БИЗНЕС-ЛОГИКА В МОДЕЛИ
+	department, err := models.CreateDepartment(r.DB, &deptReq)
+	if err != nil {
+		switch {
+		case err.Error() == "department name cannot be empty" ||
+			err.Error() == "department name too long (max 200)":
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"message": err.Error()})
+
+		case err.Error() == "parent department not found":
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"message": err.Error()})
+
+		case err.Error() == "department with this name already exists in this parent":
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]string{"message": err.Error()})
+
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{
+				"message": "could not create department",
+				"error":   err.Error(),
+			})
+		}
 		return
 	}
 
-	//Присваивание
-	department := models.Department{
-		Name:      deptReq.Name,
-		ParentId:  deptReq.ParentID,
-		CreatedAt: time.Now(),
-	}
-
-	if err := r.DB.Create(&department).Error; err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{
-			"message": "could not create department",
-			"error":   err.Error(),
-		})
-		return
-	}
-
+	// 4. Успешный ответ
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"message": "department created successfully",
 		"data":    department,
 	})
-	return
 }
 
 // Тип для запроса сотрудника
-type CreateEmployeeRequest struct {
-	FullName string     `json:"full_name"`
-	Position string     `json:"position"`
-	HiredAt  *time.Time `json:"hired_at"`
-}
+type CreateEmployeeRequest = models.EmployeeRequest
 
-func (r *Reposytory) CreateEmployeeInDepartment(w http.ResponseWriter, req *http.Request) {
+func (r *Repository) CreateEmployeeInDepartment(w http.ResponseWriter, req *http.Request) {
+	// Проверка метода
+	if req.Method != http.MethodPost {
+		http.Error(w, `{"message": "method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
 
-	//Выявление ид подразделения
+	// Получение id
 	departmentIDStr := req.PathValue("id")
 	if departmentIDStr == "" {
 		http.Error(w, `{"message": "department id is required"}`, http.StatusBadRequest)
@@ -145,18 +186,8 @@ func (r *Reposytory) CreateEmployeeInDepartment(w http.ResponseWriter, req *http
 		return
 	}
 
-	var department models.Department
-	if err := r.DB.First(&department, uint(departmentID)).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			http.Error(w, `{"message": "department not found"}`, http.StatusNotFound)
-			return
-		}
-		http.Error(w, `{"message": "database error"}`, http.StatusInternalServerError)
-		return
-	}
-
-	//Обработка заявки
-	var empReq CreateEmployeeRequest
+	// обработка запроса
+	var empReq models.EmployeeRequest
 	if err := json.NewDecoder(req.Body).Decode(&empReq); err != nil {
 		w.WriteHeader(http.StatusUnprocessableEntity)
 		json.NewEncoder(w).Encode(map[string]string{
@@ -166,57 +197,30 @@ func (r *Reposytory) CreateEmployeeInDepartment(w http.ResponseWriter, req *http
 		return
 	}
 
-	//Валидация
-	empReq.FullName = strings.TrimSpace(empReq.FullName)
-	if empReq.FullName == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{
-			"message": "full name cannot be empty",
-		})
-		return
-	}
-	if len(empReq.FullName) > 200 {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{
-			"message": "full name too long (max 200 characters)",
-		})
-		return
-	}
-
-	empReq.Position = strings.TrimSpace(empReq.Position)
-	if empReq.Position == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{
-			"message": "position cannot be empty",
-		})
-		return
-	}
-	if len(empReq.Position) > 200 {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{
-			"message": "position too long (max 200 characters)",
-		})
+	// Вычисления из модуля
+	employee, err := models.CreateEmployee(r.DB, uint(departmentID), &empReq)
+	if err != nil {
+		switch {
+		case err.Error() == "department not found":
+			http.Error(w, `{"message": "department not found"}`, http.StatusNotFound)
+		case err.Error() == "full name cannot be empty" ||
+			err.Error() == "full name too long (max 200 characters)" ||
+			err.Error() == "position cannot be empty" ||
+			err.Error() == "position too long (max 200 characters)" ||
+			err.Error() == "hired_at cannot be in the future":
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"message": err.Error()})
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{
+				"message": "could not create employee",
+				"error":   err.Error(),
+			})
+		}
 		return
 	}
 
-	//Присваивание
-	employee := models.Employee{
-		DepartmentId: uint(departmentID),
-		FullName:     empReq.FullName,
-		Position:     empReq.Position,
-		HiredAt:      empReq.HiredAt,
-		CreatedAt:    time.Now(),
-	}
-
-	if err := r.DB.Create(&employee).Error; err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{
-			"message": "could not create employee",
-			"error":   err.Error(),
-		})
-		return
-	}
-
+	// Ответ
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"message": "employee created successfully",
@@ -224,47 +228,73 @@ func (r *Reposytory) CreateEmployeeInDepartment(w http.ResponseWriter, req *http
 	})
 }
 
-func (r *Reposytory) GetDepartment(context fiber.Ctx) error {
-	departmentmodels := &[]models.Department{}
+func (r *Repository) GetDepartment(w http.ResponseWriter, req *http.Request) {
+	// Проверка метода
+	if req.Method != http.MethodGet {
+		http.Error(w, `{"message": "method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
 
-	err := r.DB.Find(departmentmodels).Error
+	// Получение id
+	idStr := req.PathValue("id")
+	if idStr == "" {
+		http.Error(w, `{"message": "department id is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	departmentID, err := strconv.ParseUint(idStr, 10, 32)
 	if err != nil {
-		context.Status(http.StatusBadRequest).JSON(
-			&fiber.Map{"message": "Could not get department"})
-		return err
-
+		http.Error(w, `{"message": "invalid department id"}`, http.StatusBadRequest)
+		return
 	}
 
-	context.Status(http.StatusOK).JSON(fiber.Map{
-		"message": "department fetched successfully",
-		"data":    departmentmodels,
-	})
-	return nil
+	// Обработка заявки
+	depth := 1
+	depthStr := req.URL.Query().Get("depth")
+	if depthStr != "" {
+		if d, err := strconv.Atoi(depthStr); err == nil && d >= 1 && d <= 5 {
+			depth = d
+		} else {
+			http.Error(w, `{"message": "depth must be between 1 and 5"}`, http.StatusBadRequest)
+			return
+		}
+	}
+
+	includeEmployees := true
+	includeStr := req.URL.Query().Get("include_employees")
+	if includeStr != "" {
+		if b, err := strconv.ParseBool(includeStr); err == nil {
+			includeEmployees = b
+		} else {
+			http.Error(w, `{"message": "include_employees must be true or false"}`, http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Вычисления из модуля
+	var dept models.Department
+	response, err := dept.GetWithTree(r.DB, uint(departmentID), depth, includeEmployees)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			http.Error(w, `{"message": "department not found"}`, http.StatusNotFound)
+			return
+		}
+		http.Error(w, `{"message": "database error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	// Ответ
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
 }
 
-func (r *Reposytory) MoveDepartment(context fiber.Ctx) error {
+func (r *Repository) MoveDepartment() {
 	//todo
-	return nil
+	return
 }
 
-func (r *Reposytory) DeleteDepartment(context fiber.Ctx) error {
-	departmentmodels := &[]models.Department{}
-
-	id := context.Params("id")
-	if id == "" {
-		context.Status(http.StatusInternalServerError).JSON(&fiber.Map{
-			"message": "id cannot be empty"})
-		return nil
-	}
-
-	err := r.DB.Delete(departmentmodels, id)
-	if err.Error != nil {
-		context.Status(http.StatusBadRequest).JSON(&fiber.Map{
-			"massage": "could not delete department"})
-		return err.Error
-	}
-
-	context.Status(http.StatusOK).JSON(&fiber.Map{
-		"message": "department delete successfully"})
-	return nil
+func (r *Repository) DeleteDepartment() {
+	// todo
+	return
 }

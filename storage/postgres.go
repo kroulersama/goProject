@@ -27,3 +27,10 @@ func NewConnection(config *Config) (*gorm.DB, error) {
 	}
 	return db, err
 }
+
+func (c *Config) GetDSN() string {
+	return fmt.Sprintf(
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
+		c.Host, c.Port, c.User, c.Password, c.DBName, c.SSLMode,
+	)
+}
