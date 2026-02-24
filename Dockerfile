@@ -2,6 +2,7 @@
 FROM golang:1.26.0 AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
+COPY migrations ./migrations
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o server

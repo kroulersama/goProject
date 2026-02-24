@@ -70,6 +70,15 @@ func CreateDepartment(db *gorm.DB, req *DepartmentRequest) (*Department, error) 
 		}
 	}
 
+	// Проверка уникальность имени в ветке
+	unique, err := CheckNameUniqueInBranch(db, req.Name, req.ParentID)
+	if err != nil {
+		return nil, err
+	}
+	if !unique {
+		return nil, ErrNameExists
+	}
+
 	// Создание подразделения
 	department := &Department{
 		Name:      req.Name,
@@ -324,6 +333,50 @@ func (d *Department) getChildIDs(db *gorm.DB, parentID uint, ids *[]uint) error 
 	for _, child := range children {
 		*ids = append(*ids, child.Id)
 		if err := d.getChildIDs(db, child.Id, ids); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Проверяет уникальность имени в ветке
+func CheckNameUniqueInBranch(db *gorm.DB, name string, parentID *uint) (bool, error) {
+	var count int64
+
+	if parentID == nil {
+		// Проверяем все корневые
+		err := db.Model(&Department{}).
+			Where("name = ? AND parent_id IS NULL", name).
+			Count(&count).Error
+		return count == 0, err
+	}
+
+	// Получаем всех потомков
+	var allIDs []uint
+	err := getBranchIDs(db, *parentID, &allIDs)
+	if err != nil {
+		return false, err
+	}
+	allIDs = append(allIDs, *parentID)
+
+	// Проверяем уникальность
+	err = db.Model(&Department{}).
+		Where("name = ? AND id IN ?", name, allIDs).
+		Count(&count).Error
+
+	return count == 0, err
+}
+
+// Собирает ID всех потомков
+func getBranchIDs(db *gorm.DB, parentID uint, ids *[]uint) error {
+	var children []Department
+	if err := db.Where("parent_id = ?", parentID).Find(&children).Error; err != nil {
+		return err
+	}
+
+	for _, child := range children {
+		*ids = append(*ids, child.Id)
+		if err := getBranchIDs(db, child.Id, ids); err != nil {
 			return err
 		}
 	}

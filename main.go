@@ -108,13 +108,13 @@ type Repository struct {
 type CreateDepartmentRequest = models.DepartmentRequest
 
 func (r *Repository) CreateDepartment(w http.ResponseWriter, req *http.Request) {
-	// 1. Проверка метода
+	// Проверка метода
 	if req.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// 2. Декодирование JSON
+	// Декодирование JSON
 	var deptReq models.DepartmentRequest
 	if err := json.NewDecoder(req.Body).Decode(&deptReq); err != nil {
 		w.WriteHeader(http.StatusUnprocessableEntity)
@@ -125,17 +125,17 @@ func (r *Repository) CreateDepartment(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	// 3. ВСЯ БИЗНЕС-ЛОГИКА В МОДЕЛИ
+	// Обработка в модуле
 	department, err := models.CreateDepartment(r.DB, &deptReq)
 	if err != nil {
 		switch {
-		case err.Error() == models.ErrNameEmpty.Error() ||
-			err.Error() == models.ErrNameTooLong.Error() ||
-			err.Error() == models.ErrParentNotFound.Error():
+		case errors.Is(err, models.ErrNameEmpty) ||
+			errors.Is(err, models.ErrNameTooLong) ||
+			errors.Is(err, models.ErrParentNotFound):
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{"message": err.Error()})
 
-		case err.Error() == models.ErrNameExists.Error():
+		case errors.Is(err, models.ErrNameExists):
 			w.WriteHeader(http.StatusConflict)
 			json.NewEncoder(w).Encode(map[string]string{"message": err.Error()})
 
