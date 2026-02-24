@@ -48,7 +48,7 @@ func main() {
 	//Инициализация Путей
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /departments", r.CreateDepartment)
-	mux.HandleFunc("POST /departments/{id}/employee", r.CreateEmployeeInDepartment)
+	mux.HandleFunc("POST /departments/{id}/employees", r.CreateEmployeeInDepartment)
 	mux.HandleFunc("GET /departments/{id}", r.GetDepartment)
 	mux.HandleFunc("PATCH /departments/{id}", r.MoveDepartment)
 	mux.HandleFunc("DELETE /departments/{id}", r.DeleteDepartment)
@@ -105,10 +105,7 @@ type Repository struct {
 }
 
 // Тип для запроса подразделения
-type CreateDepartmentRequest struct {
-	Name     string `json:"name"`
-	ParentID *uint  `json:"parent_id"`
-}
+type CreateDepartmentRequest = models.DepartmentRequest
 
 func (r *Repository) CreateDepartment(w http.ResponseWriter, req *http.Request) {
 	// 1. Проверка метода
@@ -132,16 +129,13 @@ func (r *Repository) CreateDepartment(w http.ResponseWriter, req *http.Request) 
 	department, err := models.CreateDepartment(r.DB, &deptReq)
 	if err != nil {
 		switch {
-		case err.Error() == "department name cannot be empty" ||
-			err.Error() == "department name too long (max 200)":
+		case err.Error() == models.ErrNameEmpty.Error() ||
+			err.Error() == models.ErrNameTooLong.Error() ||
+			err.Error() == models.ErrParentNotFound.Error():
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{"message": err.Error()})
 
-		case err.Error() == "parent department not found":
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"message": err.Error()})
-
-		case err.Error() == "department with this name already exists in this parent":
+		case err.Error() == models.ErrNameExists.Error():
 			w.WriteHeader(http.StatusConflict)
 			json.NewEncoder(w).Encode(map[string]string{"message": err.Error()})
 
@@ -201,13 +195,14 @@ func (r *Repository) CreateEmployeeInDepartment(w http.ResponseWriter, req *http
 	employee, err := models.CreateEmployee(r.DB, uint(departmentID), &empReq)
 	if err != nil {
 		switch {
-		case err.Error() == "department not found":
-			http.Error(w, `{"message": "department not found"}`, http.StatusNotFound)
-		case err.Error() == "full name cannot be empty" ||
-			err.Error() == "full name too long (max 200 characters)" ||
-			err.Error() == "position cannot be empty" ||
-			err.Error() == "position too long (max 200 characters)" ||
-			err.Error() == "hired_at cannot be in the future":
+		case err.Error() == models.ErrDepartmentNotFound.Error():
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"message": err.Error()})
+		case err.Error() == models.ErrFullNameEmpty.Error() ||
+			err.Error() == models.ErrFullNameTooLong.Error() ||
+			err.Error() == models.ErrPositionEmpty.Error() ||
+			err.Error() == models.ErrPositionTooLong.Error() ||
+			err.Error() == models.ErrHiredAtFuture.Error():
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{"message": err.Error()})
 		default:
@@ -289,12 +284,144 @@ func (r *Repository) GetDepartment(w http.ResponseWriter, req *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-func (r *Repository) MoveDepartment() {
-	//todo
-	return
+func (r *Repository) MoveDepartment(w http.ResponseWriter, req *http.Request) {
+	// Проверка метода
+	if req.Method != http.MethodPatch {
+		http.Error(w, `{"message": "method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Вычленение Id
+	idStr := req.PathValue("id")
+	if idStr == "" {
+		http.Error(w, `{"message": "department id is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	departmentID, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		http.Error(w, `{"message": "invalid department id"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Обработка запроса
+	var deptReq models.DepartmentRequest
+	if err := json.NewDecoder(req.Body).Decode(&deptReq); err != nil {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		json.NewEncoder(w).Encode(map[string]string{
+			"message": "invalid request format",
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	// Логика в модуле
+	updatedDepartment, err := models.UpdateDepartment(r.DB, uint(departmentID), &deptReq)
+	if err != nil {
+		switch {
+		case err.Error() == models.ErrDepartmentNotFound.Error():
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"message": err.Error()})
+
+		case err.Error() == models.ErrNameTooLong.Error() ||
+			err.Error() == models.ErrNameEmpty.Error() ||
+			err.Error() == models.ErrParentNotFound.Error():
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"message": err.Error()})
+
+		case err.Error() == models.ErrSelfParent.Error() ||
+			err.Error() == models.ErrCycleDetected.Error() ||
+			err.Error() == models.ErrNameExists.Error():
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]string{"message": err.Error()})
+
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{
+				"message": "could not update department",
+				"error":   err.Error(),
+			})
+		}
+		return
+	}
+
+	// Успешный ответ
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": "department updated successfully",
+		"data":    updatedDepartment,
+	})
 }
 
-func (r *Repository) DeleteDepartment() {
-	// todo
-	return
+func (r *Repository) DeleteDepartment(w http.ResponseWriter, req *http.Request) {
+	// Проверка метода
+	if req.Method != http.MethodDelete {
+		http.Error(w, `{"message": "method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Получаем Id
+	idStr := req.PathValue("id")
+	if idStr == "" {
+		http.Error(w, `{"message": "department id is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	departmentID, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		http.Error(w, `{"message": "invalid department id"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Параметры
+	mode := req.URL.Query().Get("mode")
+	if mode == "" {
+		http.Error(w, `{"message": "mode parameter is required (cascade or reassign)"}`, http.StatusBadRequest)
+		return
+	}
+
+	var reassignToID *uint
+	if mode == "reassign" {
+		reassignStr := req.URL.Query().Get("reassign_to_department_id")
+		if reassignStr == "" {
+			http.Error(w, `{"message": "reassign_to_department_id is required for reassign mode"}`, http.StatusBadRequest)
+			return
+		}
+
+		reassignID, err := strconv.ParseUint(reassignStr, 10, 32)
+		if err != nil {
+			http.Error(w, `{"message": "invalid reassign_to_department_id"}`, http.StatusBadRequest)
+			return
+		}
+		reassignIDUint := uint(reassignID)
+		reassignToID = &reassignIDUint
+	}
+
+	// Логика в  модели
+	err = models.DeleteDepartment(r.DB, uint(departmentID), mode, reassignToID)
+	if err != nil {
+		switch {
+		case err.Error() == models.ErrDepartmentNotFound.Error():
+			http.Error(w, `{"message": "department not found"}`, http.StatusNotFound)
+
+		case err.Error() == models.ErrTargetNotFound.Error():
+			http.Error(w, `{"message": "target department not found"}`, http.StatusNotFound)
+
+		case err.Error() == models.ErrReassignToSame.Error() ||
+			err.Error() == models.ErrInvalidMode.Error():
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"message": err.Error()})
+
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{
+				"message": "could not delete department",
+				"error":   err.Error(),
+			})
+		}
+		return
+	}
+
+	// Успешное удаление
+	w.WriteHeader(http.StatusNoContent)
 }

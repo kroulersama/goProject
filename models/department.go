@@ -43,10 +43,10 @@ func (d *DepartmentRequest) Validate() error {
 
 	// Проверка имени
 	if d.Name == "" {
-		return errors.New("department name cannot be empty")
+		return ErrNameEmpty
 	}
 	if len(d.Name) > 200 {
-		return errors.New("department name too long (max 200)")
+		return ErrFullNameTooLong
 	}
 
 	return nil
@@ -64,7 +64,7 @@ func CreateDepartment(db *gorm.DB, req *DepartmentRequest) (*Department, error) 
 		var parent Department
 		if err := db.First(&parent, *req.ParentID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, errors.New("parent department not found")
+				return nil, ErrParentNotFound
 			}
 			return nil, err
 		}
@@ -81,7 +81,7 @@ func CreateDepartment(db *gorm.DB, req *DepartmentRequest) (*Department, error) 
 		// Проверка Имени
 		if strings.Contains(err.Error(), "duplicate key") ||
 			strings.Contains(err.Error(), "unique constraint") {
-			return nil, errors.New("department with this name already exists in this parent")
+			return nil, ErrNameExists
 		}
 		return nil, err
 	}
@@ -89,13 +89,13 @@ func CreateDepartment(db *gorm.DB, req *DepartmentRequest) (*Department, error) 
 	return department, nil
 }
 
-// Обновляет существующий подразделения
+// Обновляет существующее подразделения
 func UpdateDepartment(db *gorm.DB, id uint, req *DepartmentRequest) (*Department, error) {
 	// Проверка существования
 	var department Department
 	if err := db.First(&department, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errors.New("department not found")
+			return nil, ErrDepartmentNotFound
 		}
 		return nil, err
 	}
@@ -104,7 +104,7 @@ func UpdateDepartment(db *gorm.DB, id uint, req *DepartmentRequest) (*Department
 	if req.Name != "" {
 		req.Name = strings.TrimSpace(req.Name)
 		if len(req.Name) > 200 {
-			return nil, errors.New("department name too long (max 200)")
+			return nil, ErrNameTooLong
 		}
 		department.Name = req.Name
 	}
@@ -115,12 +115,12 @@ func UpdateDepartment(db *gorm.DB, id uint, req *DepartmentRequest) (*Department
 		var parent Department
 		if err := db.First(&parent, *req.ParentID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, errors.New("parent department not found")
+				return nil, ErrParentNotFound
 			}
 			return nil, err
 		}
 
-		// Проверка родителем и потомка
+		// Проверка родитель - потомок
 		if err := checkCycle(db, id, *req.ParentID); err != nil {
 			return nil, err
 		}
@@ -131,7 +131,7 @@ func UpdateDepartment(db *gorm.DB, id uint, req *DepartmentRequest) (*Department
 	// Сохранение
 	if err := db.Save(&department).Error; err != nil {
 		if strings.Contains(err.Error(), "duplicate key") {
-			return nil, errors.New("department with this name already exists in this parent")
+			return nil, ErrNameExists
 		}
 		return nil, err
 	}
@@ -141,44 +141,62 @@ func UpdateDepartment(db *gorm.DB, id uint, req *DepartmentRequest) (*Department
 
 // Удалить подразделение с переводом сотрудников
 func DeleteDepartment(db *gorm.DB, id uint, mode string, reassignToID *uint) error {
-	// Проверка подразделения
+	// Проверка существования
 	var department Department
 	if err := db.First(&department, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return errors.New("department not found")
+			return ErrDepartmentNotFound
 		}
 		return err
 	}
 
+	// 2. Обрабатываем режимы
 	switch mode {
 	case "cascade":
 		// Каскадное удаление
 		return db.Delete(&department).Error
 
 	case "reassign":
+		// С переводом
 		if reassignToID == nil {
 			return errors.New("reassign_to_department_id is required for reassign mode")
 		}
 
-		// Проверка целевого подразделения
-		var target Department
-		if err := db.First(&target, *reassignToID).Error; err != nil {
+		if *reassignToID == id {
+			return ErrReassignToSame
+		}
+
+		// Проверяем целевое
+		var targetDepartment Department
+		if err := db.First(&targetDepartment, *reassignToID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return errors.New("target department not found")
+				return ErrTargetNotFound
 			}
 			return err
 		}
 
-		// Обработка
 		return db.Transaction(func(tx *gorm.DB) error {
-			// Перевод сотрудников
+			// Переводим сотрудников
 			if err := tx.Model(&Employee{}).
 				Where("department_id = ?", id).
 				Update("department_id", *reassignToID).Error; err != nil {
 				return err
 			}
 
-			// Удаление подразделения
+			// Получаем все дочерние
+			var children []Department
+			if err := tx.Where("parent_id = ?", id).Find(&children).Error; err != nil {
+				return err
+			}
+
+			// Удаление дочерних с сотрудниками
+			for _, child := range children {
+				if err := tx.Delete(&child).Error; err != nil {
+					return err
+				}
+			}
+
+			// Удаляем подразделение
 			if err := tx.Delete(&department).Error; err != nil {
 				return err
 			}
@@ -187,14 +205,14 @@ func DeleteDepartment(db *gorm.DB, id uint, mode string, reassignToID *uint) err
 		})
 
 	default:
-		return errors.New("invalid mode, use 'cascade' or 'reassign'")
+		return ErrInvalidMode
 	}
 }
 
 // Проверяет нового parent_id
 func checkCycle(db *gorm.DB, deptID, newParentID uint) error {
 	if deptID == newParentID {
-		return errors.New("department cannot be parent of itself")
+		return ErrSelfParent
 	}
 
 	// Получаем всех потомков
@@ -206,7 +224,7 @@ func checkCycle(db *gorm.DB, deptID, newParentID uint) error {
 	// Проверка родитель-потомок
 	for _, childID := range childIDs {
 		if newParentID == childID {
-			return errors.New("cannot move department to its own child (cycle detected)")
+			return ErrCycleDetected
 		}
 	}
 
@@ -311,9 +329,3 @@ func (d *Department) getChildIDs(db *gorm.DB, parentID uint, ids *[]uint) error 
 	}
 	return nil
 }
-
-// Кастомные ошибки
-var (
-	ErrSelfParent    = errors.New("department cannot be parent of itself")
-	ErrCycleDetected = errors.New("cycle detected in department tree")
-)

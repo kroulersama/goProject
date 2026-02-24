@@ -44,23 +44,23 @@ func (e *EmployeeRequest) Validate() error {
 
 	// Проверка имени
 	if e.FullName == "" {
-		return errors.New("full name cannot be empty")
+		return ErrFullNameEmpty
 	}
 	if len(e.FullName) > 200 {
-		return errors.New("full name too long (max 200 characters)")
+		return ErrFullNameTooLong
 	}
 
 	// Проверка должности
 	if e.Position == "" {
-		return errors.New("position cannot be empty")
+		return ErrPositionEmpty
 	}
 	if len(e.Position) > 200 {
-		return errors.New("position too long (max 200 characters)")
+		return ErrPositionTooLong
 	}
 
 	// Проверка даты найма
 	if e.HiredAt != nil && e.HiredAt.After(time.Now()) {
-		return errors.New("hired_at cannot be in the future")
+		return ErrHiredAtFuture
 	}
 
 	return nil
@@ -72,7 +72,7 @@ func CreateEmployee(db *gorm.DB, departmentID uint, req *EmployeeRequest) (*Empl
 	var department Department
 	if err := db.First(&department, departmentID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errors.New("department not found")
+			return nil, ErrDepartmentNotFound
 		}
 		return nil, err
 	}
