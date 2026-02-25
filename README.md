@@ -31,16 +31,17 @@ docker compose up -d
 ## API Endpoints
 
 ## Отделы
-Метод	    Endpoint	            Описание
-POST	    /departments	        Создание нового подразделения
-GET	      /departments/{id}	    Получение информации об подразделении
-PATCH	    /departments/{id}	    Перемещение/переименование подразделения
-DELETE	  /departments/{id}	    Удаление подразделения
+| Метод | Endpoint | Описание |
+|-------|----------|----------|
+| POST | `/departments` | Создание нового подразделения |
+| GET	| `/departments/{id}`	| Получение информации об подразделении |
+| PATCH	| `/departments/{id}`	| Перемещение/переименование подразделения |
+| DELETE | `/departments/{id}` | Удаление подразделения |
 
 ## Сотрудники
 | Метод | Endpoint | Описание |
 |-------|----------|----------|
-| POST | /departments/{id}/employees | Создание сотрудника в подразделение|
+| POST | `/departments/{id}/employees` | Создание сотрудника в подразделение|
 
 ## Параметры запросов
 | Метод | Endpoint | Параметры пути | Query параметры | Body параметры |
