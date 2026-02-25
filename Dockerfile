@@ -13,7 +13,7 @@ RUN apk add --no-cache curl
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 WORKDIR /app
 COPY --from=builder /app/server .
-COPY --from=builder /app/migrations .
+COPY migrations ./migrations
 RUN chown -R appuser:appgroup /app
 USER appuser
 EXPOSE 8080
